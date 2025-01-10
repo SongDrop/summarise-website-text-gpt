@@ -1,0 +1,208 @@
+// ==UserScript==
+// @name         Highlight to Summarize with Popup
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  Summarize highlighted text using ChatGPT API and display results in a popup immediately.
+// @author       Gabriel Majorsky
+// @match        *://*/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=chatgpt.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// @grant        GM_openInTab
+// @run-at       context-menu
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const apiKey = ''; // Replace with your API key
+    const summaryPrompt = 'Summarize this:'
+    const gptModel = 'gpt-4'
+    const gptChunk = 3000
+
+
+    const gptApiEndpoint = 'https://api.openai.com/v1/chat/completions'
+
+    // Add styles for the popup
+    GM_addStyle(`
+        #summary-popup {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10000000000;
+            background-color: white;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            width: 80%;
+            max-width: 600px;
+            padding: 15px;
+            font-family: Arial, sans-serif;
+            color: #333;
+        }
+        #summary-popup h3 {
+            display: flex;
+            align-items: center;
+            margin-top: 0;
+            margin-bottom: 4px;
+        }
+        #summary-popup h3 .summary-icon {
+            width: 20px;
+            height: 20px;
+            margin-right: 4px;
+        }
+        #summary-popup p {
+            margin: 10px 0;
+        }
+        #summary-popup textarea {
+            width: 100%;
+            max-width: 100%;
+            min-width: 100%;
+            height: 150px;
+            margin-bottom: 10px;
+            font-family: inherit;
+            font-size: 14px;
+            resize: both;
+            overflow: auto;
+            box-sizing: border-box;
+        }
+
+        #summary-popup button {
+            margin-right: 10px;
+            padding: 8px 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #summary-popup button:hover {
+            background-color: #45a049;
+        }
+        #summary-popup button#close-btn {
+            background-color: #f44336;
+        }
+        #summary-popup button#close-btn:hover {
+            background-color: #d32f2f;
+        }
+    `);
+
+    const selectedText = window.getSelection().toString().trim();
+    if (!selectedText) {
+        alert('Please highlight some text to summarize!');
+        return;
+    }
+
+    // Immediately display the popup with a "Processing" message
+    const popup = createPopup('Processing...');
+    document.body.appendChild(popup);
+
+    if (!apiKey) {
+        updatePopup('Error: API key is not set. Please update the script with your API key.');
+        return;
+    }
+
+    // Process the highlighted text
+    processText(selectedText);
+
+    function createPopup(initialContent) {
+        const popup = document.createElement('div');
+        popup.id = 'summary-popup';
+        popup.innerHTML = `
+            <h3><img src="https://www.google.com/s2/favicons?sz=64&domain=chatgpt.com" class="summary-icon">Summary</h3>
+            <p>${initialContent}</p>
+            <textarea readonly style="display: none;"></textarea>
+            <button id="copy-btn" style="display: none;">Copy</button>
+            <button id="close-btn">Close</button>
+        `;
+        popup.querySelector('#close-btn').addEventListener('click', () => {
+            popup.remove();
+        });
+        return popup;
+    }
+
+    function updatePopup(content, isSummary = false) {
+        const popup = document.getElementById('summary-popup');
+        const paragraph = popup.querySelector('p');
+        const textarea = popup.querySelector('textarea');
+        const copyButton = popup.querySelector('#copy-btn');
+
+        if (isSummary) {
+            paragraph.style.display = 'none';
+            textarea.style.display = 'block';
+            copyButton.style.display = 'inline-block';
+            textarea.textContent = content;
+
+            copyButton.addEventListener('click', () => {
+                textarea.select();
+                document.execCommand('copy');
+                alert('Summary copied to clipboard!');
+            });
+        } else {
+            paragraph.textContent = content;
+        }
+    }
+
+    function processText(text) {
+        const maxChunkLength = gptChunk;
+        const chunks = splitTextIntoChunks(text, maxChunkLength);
+        let summary = '';
+        let chunkIndex = 0;
+
+        function processNextChunk() {
+            if (chunkIndex < chunks.length) {
+                updatePopup(`Processing chunk ${chunkIndex + 1} of ${chunks.length}...`);
+                sendToChatGPT(chunks[chunkIndex], (result) => {
+                    summary += result + '\n\n';
+                    chunkIndex++;
+                    processNextChunk();
+                });
+            } else {
+                updatePopup(summary, true);
+            }
+        }
+
+        processNextChunk();
+    }
+
+    function splitTextIntoChunks(text, maxChunkLength) {
+        const chunks = [];
+        for (let i = 0; i < text.length; i += maxChunkLength) {
+            chunks.push(text.slice(i, i + maxChunkLength));
+        }
+        return chunks;
+    }
+
+    function sendToChatGPT(text, callback) {
+        const endpoint = gptApiEndpoint;
+
+        const payload = {
+            model: gptModel,
+            messages: [{ role: 'user', content: `${summaryPrompt} ${text}` }],
+        };
+
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: endpoint,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+            },
+            data: JSON.stringify(payload),
+            onload: function (response) {
+                if (response.status === 200) {
+                    const result = JSON.parse(response.responseText);
+                    const summary = result.choices[0].message.content.trim();
+                    callback(summary);
+                } else {
+                    console.error('Error:', response.statusText);
+                    updatePopup('Failed to summarize text. Check console for details.');
+                }
+            },
+            onerror: function (err) {
+                console.error('Request failed:', err);
+                updatePopup('An error occurred while connecting to the API.');
+            },
+        });
+    }
